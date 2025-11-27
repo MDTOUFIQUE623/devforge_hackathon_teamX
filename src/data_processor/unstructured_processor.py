@@ -31,10 +31,113 @@ class UnstructuredDataProcessor:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
     
+    def _is_json_like(self, text: str) -> bool:
+        """
+        Check if text looks like JSON data (to filter it out).
+        
+        Args:
+            text: Text to check
+            
+        Returns:
+            True if text looks like JSON
+        """
+        if not text or len(text.strip()) < 10:
+            return False
+        
+        text = text.strip()
+        
+        # Check for JSON-like patterns
+        # Starts with { or [ and contains common JSON patterns
+        if (text.startswith('{') or text.startswith('[')) and (
+            '"entityUrn"' in text or 
+            '"$type"' in text or 
+            '"lixTracking"' in text or
+            '"data"' in text and '"elements"' in text or
+            (text.count('"') > 5 and text.count(':') > 3)  # Multiple key-value pairs
+        ):
+            return True
+        
+        # Check for JSON-like structure with braces and quotes
+        if text.count('{') > 2 and text.count('"') > 5:
+            return True
+        
+        return False
+    
+    def _is_linkedin_ui_noise(self, text: str) -> bool:
+        """
+        Check if text is LinkedIn UI noise (navigation, notifications, etc.) to filter out.
+        
+        Args:
+            text: Text to check
+            
+        Returns:
+            True if text is LinkedIn UI noise
+        """
+        if not text or len(text.strip()) < 3:
+            return False
+        
+        text_lower = text.lower().strip()
+        
+        # LinkedIn UI patterns to filter out
+        ui_patterns = [
+            r'^\d+\s+notifications?\s+total$',
+            r'^suggested\s+for\s+you$',
+            r'^stand\s+out\s+and\s+build',
+            r'^analytics$',
+            r'^activity$',
+            r'^experience$',
+            r'^education$',
+            r'^skills$',
+            r'^interests$',
+            r'^who\s+your\s+viewers\s+also\s+viewed$',
+            r'^unlock\s+the\s+full\s+list$',
+            r'^people\s+you\s+may\s+know$',
+            r'^you\s+might\s+like$',
+            r'^show\s+recruiters',
+            r'^get\s+started$',
+            r'^share\s+that\s+you\'re\s+hiring',
+            r'^showcase\s+your\s+services',
+            r'^private\s+to\s+you$',
+            r'^enhance\s+your\s+profile',
+            r'^\d+\s+followers?$',
+            r'^show\s+your\s+qualifications',
+            r'^1-month\s+free\s+trial',
+            r'^we\'ll\s+remind\s+you',
+            r'^home$',
+            r'^my\s+network$',
+            r'^jobs$',
+            r'^messaging$',
+            r'^notifications$',
+            r'^me$',
+            r'^search$',
+            r'^more$',
+            r'^less$',
+            r'^show\s+more$',
+            r'^show\s+less$',
+            r'^see\s+more$',
+            r'^see\s+less$',
+        ]
+        
+        for pattern in ui_patterns:
+            if re.match(pattern, text_lower):
+                return True
+        
+        # Check for very short UI-like text (1-3 words that are common UI elements)
+        words = text_lower.split()
+        if len(words) <= 3:
+            ui_words = ['notifications', 'analytics', 'activity', 'experience', 'education', 
+                       'skills', 'interests', 'followers', 'connections', 'views', 'likes',
+                       'comments', 'shares', 'more', 'less', 'show', 'hide', 'close']
+            if all(word in ui_words for word in words):
+                return True
+        
+        return False
+    
     def process_html(self, html_content: str, source_name: str = "html_content") -> str:
         """
         Process HTML content and extract clean text.
-        Enhanced to handle nested divs and social media profiles (LinkedIn, etc.).
+        Optimized for large HTML files and social media profiles (LinkedIn, etc.).
+        Prioritizes content extraction over aggressive filtering.
         
         Args:
             html_content: Raw HTML string (outer HTML)
@@ -44,215 +147,257 @@ class UnstructuredDataProcessor:
             Clean structured text
         """
         try:
-            soup = BeautifulSoup(html_content, 'html.parser')
+            # Try lxml parser for better performance with large files, fallback to html.parser
+            try:
+                soup = BeautifulSoup(html_content, 'lxml')
+            except:
+                soup = BeautifulSoup(html_content, 'html.parser')
             
-            # Remove unwanted elements (scripts, styles, navigation, ads, etc.)
-            unwanted_tags = ["script", "style", "meta", "link", "noscript", "iframe", "svg", "canvas", "title"]
+            # Step 1: Remove only truly unwanted elements (scripts, styles, etc.)
+            # Don't be too aggressive - we want to preserve content
+            unwanted_tags = ["script", "style", "noscript", "iframe", "svg", "canvas"]
             for tag in unwanted_tags:
                 for element in soup.find_all(tag):
                     element.decompose()
             
-            # Focus on body content - if body exists, work with it; otherwise use whole soup
+            # Remove script tags with JSON data (LinkedIn often embeds JSON in script tags)
+            for script in soup.find_all('script', type=re.compile('application/json|application/ld\+json', re.I)):
+                script.decompose()
+            
+            # Remove elements with data attributes that contain JSON (common in LinkedIn)
+            for element in soup.find_all(attrs={"data-json-key": True}):
+                element.decompose()
+            
+            # Remove elements with JSON-like data attributes
+            for element in soup.find_all(attrs={"data-json": True}):
+                element.decompose()
+            
+            # Step 2: Remove navigation elements more carefully
+            # Only remove obvious navigation, not everything with "nav" in class name
+            for nav in soup.find_all(['nav']):
+                # Check if it's actually navigation (has links, menu items, etc.)
+                if nav.find_all('a') or 'menu' in (nav.get('class') or []) or 'navigation' in (nav.get('class') or []):
+                    nav.decompose()
+            
+            # Remove header/footer tags but be careful
+            for header in soup.find_all(['header', 'footer']):
+                # Only remove if it looks like site header/footer (has nav links)
+                if header.find_all('a', limit=3):
+                    header.decompose()
+            
+            # Step 3: Focus on body content
             main_content = soup.find('body') or soup.find('main') or soup
             
-            # Remove navigation, header, footer, and ad-related elements
-            # But preserve body/main elements themselves
-            unwanted_classes = [
-                "nav", "navigation", "navbar", "header", "footer", 
-                "sidebar", "menu", "ad", "advertisement", "ads", "banner",
-                "cookie", "popup", "modal", "overlay", "tooltip"
-            ]
-            for class_name in unwanted_classes:
-                for element in soup.find_all(class_=re.compile(class_name, re.I)):
-                    # Don't remove body or main elements themselves
-                    if element.name not in ['body', 'main', 'html']:
-                        element.decompose()
+            # Step 4: Extract text with a simpler, more aggressive approach
+            # For large HTML like LinkedIn, we need to extract everything first, then clean
             
-            # Remove elements with data attributes that suggest non-content
-            # But preserve body/main elements
-            for element in soup.find_all(attrs={"data-testid": re.compile("ad|banner|nav|footer|header", re.I)}):
-                if element.name not in ['body', 'main', 'html']:
-                    element.decompose()
-            
-            # Also remove specific navigation, header, footer tags (but not body/main)
-            for tag_name in ['nav', 'header', 'footer']:
-                for element in soup.find_all(tag_name):
-                    if element.name not in ['body', 'main', 'html']:
-                        element.decompose()
-            
-            # Extract text with structure preservation
+            # First, try to extract structured content (headings, paragraphs, lists)
             text_parts = []
-            seen_texts = set()  # To avoid duplicates
-            processed_elements = set()  # Track processed elements
+            seen_texts = set()
             
-            # First, process h1 headings (main titles) - prioritize these and ensure they're at the start
-            h1_headings = main_content.find_all('h1')
-            for heading in h1_headings:
-                level = 1
-                text = re.sub(r'\s+', ' ', heading.get_text(strip=True))
-                if text and text not in seen_texts and len(text) > 1:
-                    # Insert at the beginning for main titles
-                    text_parts.insert(0, f"# {text}")
-                    seen_texts.add(text)
-                    processed_elements.add(heading)
+            # Extract headings with their hierarchy
+            for heading in main_content.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+                text = heading.get_text(separator=' ', strip=True)
+                if text and len(text.strip()) > 1:
+                    # Filter out LinkedIn UI noise
+                    if self._is_linkedin_ui_noise(text):
+                        continue
                     
-                    # Try to capture related content in the same container (like profile title, location)
-                    parent = heading.parent
-                    if parent:
-                        # Look for sibling divs with additional info (but not nested too deep)
-                        for sibling in parent.children:
-                            if hasattr(sibling, 'name') and sibling.name in ['div', 'span']:
-                                sibling_text = re.sub(r'\s+', ' ', sibling.get_text(separator=' ', strip=True))
-                                if sibling_text and len(sibling_text) > 5 and len(sibling_text) < 200 and sibling_text not in seen_texts:
-                                    # Check it's not navigation
-                                    sibling_classes = ' '.join(sibling.get('class', [])).lower()
-                                    if not any(nav_term in sibling_classes for nav_term in ['nav', 'menu', 'header', 'footer', 'ad', 'banner']):
-                                        # Add as subtitle/info after h1
-                                        text_parts.insert(1, sibling_text)
-                                        seen_texts.add(sibling_text)
-                                        processed_elements.add(sibling)
+                    level = int(heading.name[1])
+                    heading_text = f"{'#' * level} {text}"
+                    # Use normalized text for duplicate detection
+                    normalized = re.sub(r'\s+', ' ', text.lower().strip())
+                    if normalized not in seen_texts:
+                        text_parts.append(heading_text)
+                        seen_texts.add(normalized)
             
-            # Process other headings (h2-h6)
-            for heading in main_content.find_all(['h2', 'h3', 'h4', 'h5', 'h6']):
-                if heading in processed_elements:
-                    continue
-                level = int(heading.name[1])
-                text = re.sub(r'\s+', ' ', heading.get_text(strip=True))
-                if text and text not in seen_texts and len(text) > 1:
-                    text_parts.append(f"{'#' * level} {text}")
-                    seen_texts.add(text)
-                    processed_elements.add(heading)
-                    
-                    # Try to capture related content that follows this heading
-                    # Look for next siblings that are part of the same section
-                    next_elem = heading.next_sibling
-                    section_items = []
-                    while next_elem and len(section_items) < 5:  # Limit to avoid going too far
-                        if hasattr(next_elem, 'name'):
-                            # Stop at next heading of same or higher level
-                            if next_elem.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                                next_level = int(next_elem.name[1])
-                                if next_level <= level:
-                                    break
-                            
-                            # Capture divs with structured info (like experience items)
-                            if next_elem.name == 'div':
-                                div_text = re.sub(r'\s+', ' ', next_elem.get_text(separator=' ', strip=True))
-                                if div_text and len(div_text) > 10 and div_text not in seen_texts:
-                                    div_classes = ' '.join(next_elem.get('class', [])).lower()
-                                    if not any(nav_term in div_classes for nav_term in ['nav', 'menu', 'header', 'footer', 'ad', 'banner']):
-                                        section_items.append(div_text)
-                                        seen_texts.add(div_text)
-                                        processed_elements.add(next_elem)
-                        next_elem = next_elem.next_sibling if hasattr(next_elem, 'next_sibling') else None
-                    
-                    if section_items:
-                        text_parts.extend(section_items)
-            
-            # Process paragraphs (search within main content) - skip if already processed
+            # Extract paragraphs
             for para in main_content.find_all('p'):
-                if para in processed_elements or any(para in p for p in processed_elements if hasattr(p, '__iter__')):
-                    continue
-                text = re.sub(r'\s+', ' ', para.get_text(separator=' ', strip=True))
-                if text and len(text) > 10 and text not in seen_texts:
-                    text_parts.append(text)
-                    seen_texts.add(text)
-                    processed_elements.add(para)
+                text = para.get_text(separator=' ', strip=True)
+                if text and len(text.strip()) > 5:
+                    # Filter out LinkedIn UI noise and JSON
+                    if self._is_linkedin_ui_noise(text) or self._is_json_like(text):
+                        continue
+                    
+                    normalized = re.sub(r'\s+', ' ', text.lower().strip())
+                    if normalized not in seen_texts:
+                        text_parts.append(text)
+                        seen_texts.add(normalized)
             
-            # Process lists (search within main content)
+            # Extract list items
             for list_elem in main_content.find_all(['ul', 'ol']):
                 list_items = []
-                for li in list_elem.find_all('li', recursive=False):
-                    item_text = re.sub(r'\s+', ' ', li.get_text(separator=' ', strip=True))
-                    if item_text and item_text not in seen_texts and len(item_text) > 3:
-                        list_items.append(f"- {item_text}")
-                        seen_texts.add(item_text)
+                for li in list_elem.find_all('li', recursive=True):
+                    item_text = li.get_text(separator=' ', strip=True)
+                    if item_text and len(item_text.strip()) > 2:
+                        normalized = re.sub(r'\s+', ' ', item_text.lower().strip())
+                        if normalized not in seen_texts:
+                            list_items.append(f"- {item_text}")
+                            seen_texts.add(normalized)
                 if list_items:
                     text_parts.append("\n".join(list_items))
             
-            # Process tables (search within main content)
+            # Extract table content
             for table in main_content.find_all('table'):
                 rows = []
                 for tr in table.find_all('tr'):
-                    cells = [td.get_text(strip=True) for td in tr.find_all(['td', 'th'])]
-                    if cells and any(cell for cell in cells):
+                    cells = [td.get_text(separator=' ', strip=True) for td in tr.find_all(['td', 'th'])]
+                    if cells and any(cell.strip() for cell in cells):
                         row_text = " | ".join(cells)
-                        if row_text not in seen_texts:
+                        if row_text.strip():
                             rows.append(row_text)
-                            seen_texts.add(row_text)
                 if rows:
                     text_parts.append("\n".join(rows))
             
-            # Enhanced: Process meaningful divs (for social media profiles, nested content)
-            # Look for divs with substantial text content that aren't already captured
+            # Step 5: For LinkedIn and similar sites, extract text from divs and spans
+            # This is important because LinkedIn uses lots of nested divs
+            # Extract meaningful div content (not navigation)
             for div in main_content.find_all('div'):
-                # Skip if already processed
-                if div in processed_elements:
+                # Skip if it's navigation
+                div_classes = ' '.join(div.get('class', [])).lower()
+                if any(nav_term in div_classes for nav_term in ['nav', 'navbar', 'menu', 'sidebar', 'header', 'footer']):
                     continue
-                # Skip if div contains only other block elements (already processed)
+                
+                # Skip if it contains only other block elements (already processed)
                 if div.find(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'table']):
                     continue
                 
-                # Get text from div and clean it
-                div_text = re.sub(r'\s+', ' ', div.get_text(separator=' ', strip=True))
-                
-                # Check if it's substantial content (not just navigation, buttons, etc.)
-                if (div_text and 
-                    len(div_text) > 20 and  # Minimum length
-                    div_text not in seen_texts and
-                    # Filter out common non-content patterns
-                    not re.match(r'^(Home|About|Contact|Login|Sign|Menu|Search|Follow|Share|Like|Comment|Subscribe|Cookie|Accept|Decline|Close|×|←|→|↑|↓)$', div_text, re.I) and
-                    # Check if it looks like meaningful content (has some words)
-                    len(div_text.split()) > 3):
+                # Get text from div
+                div_text = div.get_text(separator=' ', strip=True)
+                if div_text and len(div_text.strip()) > 10:
+                    # Filter out LinkedIn UI noise and JSON
+                    if self._is_linkedin_ui_noise(div_text) or self._is_json_like(div_text):
+                        continue
                     
-                    # Check if parent is not a navigation/header/footer
-                    parent_classes = ' '.join(div.parent.get('class', [])) if div.parent else ''
-                    if not any(nav_term in parent_classes.lower() for nav_term in ['nav', 'header', 'footer', 'menu', 'sidebar']):
+                    normalized = re.sub(r'\s+', ' ', div_text.lower().strip())
+                    # Filter out obvious non-content (single words, buttons, etc.)
+                    if (normalized not in seen_texts and 
+                        len(div_text.split()) > 2 and
+                        not re.match(r'^(Home|About|Contact|Login|Sign|Menu|Search|Follow|Share|Like|Comment|Subscribe|Cookie|Accept|Decline|Close|×|←|→|↑|↓|More|Less|Show|Hide)$', div_text.strip(), re.I)):
                         text_parts.append(div_text)
-                        seen_texts.add(div_text)
-                        processed_elements.add(div)
+                        seen_texts.add(normalized)
             
-            # Process span elements with substantial content (for inline content in divs)
+            # Extract meaningful span content (for inline text in divs)
             for span in main_content.find_all('span'):
-                span_text = re.sub(r'\s+', ' ', span.get_text(separator=' ', strip=True))
-                if (span_text and 
-                    len(span_text) > 30 and  # Longer threshold for spans
-                    span_text not in seen_texts and
-                    len(span_text.split()) > 5 and
-                    # Not a button or link text
-                    not span.find_parent(['button', 'a']) and
-                    # Not in navigation
-                    not any(nav_term in ' '.join(span.parent.get('class', [])).lower() for nav_term in ['nav', 'menu', 'header', 'footer'])):
-                    text_parts.append(span_text)
-                    seen_texts.add(span_text)
+                # Skip if in navigation or button
+                if span.find_parent(['nav', 'button', 'a']):
+                    continue
+                
+                span_text = span.get_text(separator=' ', strip=True)
+                if span_text and len(span_text.strip()) > 15:
+                    # Filter out LinkedIn UI noise and JSON
+                    if self._is_linkedin_ui_noise(span_text) or self._is_json_like(span_text):
+                        continue
+                    
+                    normalized = re.sub(r'\s+', ' ', span_text.lower().strip())
+                    if (normalized not in seen_texts and 
+                        len(span_text.split()) > 3):
+                        text_parts.append(span_text)
+                        seen_texts.add(normalized)
             
-            # If no structured content found, get all text (fallback)
-            if not text_parts:
-                text = main_content.get_text(separator='\n', strip=True)
-                # Clean up excessive whitespace
-                text = re.sub(r'\n{3,}', '\n\n', text)
-                # Remove very short lines that are likely noise
-                lines = [line for line in text.split('\n') if len(line.strip()) > 5]
-                text = '\n'.join(lines)
-                return text
+            # Step 6: If we have structured content, combine and clean it
+            if text_parts:
+                # Filter out any JSON-like content from text_parts before combining
+                filtered_parts = []
+                for part in text_parts:
+                    # Check each line in the part
+                    lines = part.split('\n')
+                    filtered_lines = []
+                    for line in lines:
+                        line = line.strip()
+                        if line and not self._is_json_like(line):
+                            filtered_lines.append(line)
+                    if filtered_lines:
+                        filtered_parts.append('\n'.join(filtered_lines))
+                
+                if filtered_parts:
+                    result = "\n\n".join(filtered_parts)
+                    # Simple cleaning - don't be too aggressive
+                    result = re.sub(r'\n{3,}', '\n\n', result)  # Max 2 newlines
+                    result = re.sub(r' {2,}', ' ', result)  # Normalize spaces
+                    result = result.strip()
+                    
+                    # If we got substantial content, return it
+                    if result and len(result.strip()) > 20:
+                        return result
             
-            # Combine all parts and apply advanced cleaning
-            result = "\n\n".join(text_parts)
+            # Step 7: Fallback - extract all text if structured extraction didn't work
+            # This is important for large, complex HTML
+            all_text = main_content.get_text(separator='\n', strip=True)
             
-            # Advanced text cleaning and formatting
-            result = self._clean_and_format_text(result)
+            # Clean up the text
+            # Remove excessive newlines
+            all_text = re.sub(r'\n{3,}', '\n\n', all_text)
+            # Normalize whitespace
+            all_text = re.sub(r'[ \t]+', ' ', all_text)
+            # Remove very short lines (likely noise) and JSON-like content
+            lines = []
+            for line in all_text.split('\n'):
+                line = line.strip()
+                if line and len(line) > 3 and not self._is_json_like(line):
+                    lines.append(line)
+            all_text = '\n'.join(lines)
             
-            return result.strip()
+            # If we have content, return it
+            if all_text and len(all_text.strip()) > 10:
+                return all_text.strip()
+            
+            # Step 8: Last resort - get everything from the entire document
+            all_text = soup.get_text(separator=' ', strip=True)
+            all_text = re.sub(r'\s+', ' ', all_text).strip()
+            
+            # Filter out JSON-like content from final extraction
+            if self._is_json_like(all_text):
+                # Try to extract lines that aren't JSON
+                lines = all_text.split(' ')
+                filtered_lines = [line for line in lines if not self._is_json_like(line) and len(line.strip()) > 3]
+                all_text = ' '.join(filtered_lines)
+            
+            if all_text and len(all_text) > 10:
+                return all_text
+            
+            return ""
             
         except Exception as e:
-            # Fallback: basic HTML tag removal
+            # Exception fallback: try simple extraction
+            try:
+                soup_fallback = BeautifulSoup(html_content, 'html.parser')
+                # Remove scripts and styles (including JSON scripts)
+                for tag in soup_fallback(["script", "style", "noscript"]):
+                    tag.decompose()
+                
+                # Remove JSON script tags
+                for script in soup_fallback.find_all('script', type=re.compile('application/json|application/ld\+json', re.I)):
+                    script.decompose()
+                
+                # Get all text
+                text = soup_fallback.get_text(separator=' ', strip=True)
+                text = re.sub(r'\s+', ' ', text).strip()
+                
+                # Filter out JSON-like content
+                if self._is_json_like(text):
+                    # Try to extract non-JSON parts
+                    lines = text.split(' ')
+                    filtered_lines = [line for line in lines if not self._is_json_like(line) and len(line.strip()) > 3]
+                    text = ' '.join(filtered_lines)
+                
+                if text and len(text) > 10:
+                    return text
+            except:
+                pass
+            
+            # Final fallback: regex-based extraction
             text = re.sub(r'<[^>]+>', '', html_content)
             text = html.unescape(text)
-            text = re.sub(r'\n{3,}', '\n\n', text)
-            # Remove very short lines
-            lines = [line for line in text.split('\n') if len(line.strip()) > 3]
-            text = '\n'.join(lines)
-            return text.strip()
+            text = re.sub(r'\s+', ' ', text).strip()
+            
+            # Filter out JSON-like content
+            if self._is_json_like(text):
+                lines = text.split(' ')
+                filtered_lines = [line for line in lines if not self._is_json_like(line) and len(line.strip()) > 3]
+                text = ' '.join(filtered_lines)
+            
+            return text if text and len(text) > 10 else ""
     
     def _clean_and_format_text(self, text: str) -> str:
         """
@@ -501,14 +646,52 @@ class UnstructuredDataProcessor:
                 return {
                     "success": False,
                     "error": f"HTML file not found: {html_file_path}",
-                    "file_path": None
+                    "file_path": None,
+                    "content_length": 0,
+                    "paragraphs": 0,
+                    "filename": None
                 }
             
             # Read HTML content
             html_content = html_file_path.read_text(encoding='utf-8', errors='ignore')
             
+            # Validate that we read some content
+            if not html_content or len(html_content.strip()) < 10:
+                return {
+                    "success": False,
+                    "error": f"HTML file appears to be empty or too small ({len(html_content)} characters). Please check the file.",
+                    "file_path": None,
+                    "content_length": 0,
+                    "paragraphs": 0,
+                    "filename": None
+                }
+            
             # Process HTML
             processed_text = self.process_html(html_content, source_name=html_file_path.stem)
+            
+            # Validate that we got some content
+            if not processed_text or len(processed_text.strip()) == 0:
+                # Try a more aggressive extraction as fallback
+                from bs4 import BeautifulSoup
+                soup_fallback = BeautifulSoup(html_content, 'html.parser')
+                # Remove scripts and styles
+                for tag in soup_fallback(["script", "style", "meta", "link"]):
+                    tag.decompose()
+                # Get all text
+                processed_text = soup_fallback.get_text(separator=' ', strip=True)
+                # Clean up
+                processed_text = re.sub(r'\s+', ' ', processed_text).strip()
+                
+                # If still empty, return error
+                if not processed_text or len(processed_text.strip()) < 5:
+                    return {
+                        "success": False,
+                        "error": "HTML file contains no extractable text content. The file may be empty or contain only scripts/styles.",
+                        "file_path": None,
+                        "content_length": 0,
+                        "paragraphs": 0,
+                        "filename": None
+                    }
             
             # Determine output path
             if output_dir is None:
@@ -522,20 +705,46 @@ class UnstructuredDataProcessor:
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(processed_text)
             
+            # Count paragraphs - improved logic
+            # First try splitting by double newlines
+            paragraphs = [p.strip() for p in processed_text.split('\n\n') if p.strip()]
+            
+            # If no double newlines, try single newlines for substantial content
+            if not paragraphs:
+                paragraphs = [p.strip() for p in processed_text.split('\n') if p.strip() and len(p.strip()) > 10]
+            
+            # If still no paragraphs but we have content, count by sentences or minimum length blocks
+            if not paragraphs and processed_text.strip():
+                # Split by periods and count substantial sentences
+                sentences = [s.strip() for s in processed_text.split('.') if s.strip() and len(s.strip()) > 10]
+                if sentences:
+                    # Group sentences into paragraphs (roughly 2-3 sentences per paragraph)
+                    para_count = max(1, len(sentences) // 2)
+                    paragraphs = ['dummy'] * para_count  # Just for counting
+                else:
+                    # Last resort: if we have any content, count as 1 paragraph
+                    paragraphs = ['dummy'] if len(processed_text.strip()) > 10 else []
+            
+            # Ensure we have at least 1 paragraph if content exists
+            para_count = len(paragraphs) if paragraphs else (1 if len(processed_text.strip()) > 10 else 0)
+            
             return {
                 "success": True,
                 "file_path": str(output_path),
                 "filename": output_filename,
                 "original_file": str(html_file_path),
                 "content_length": len(processed_text),
-                "paragraphs": len([p for p in processed_text.split('\n\n') if p.strip()])
+                "paragraphs": para_count
             }
             
         except Exception as e:
             return {
                 "success": False,
                 "error": str(e),
-                "file_path": None
+                "file_path": None,
+                "content_length": 0,
+                "paragraphs": 0,
+                "filename": None
             }
     
     def process_and_save(
@@ -562,7 +771,39 @@ class UnstructuredDataProcessor:
         try:
             # Process based on type
             if content_type == 'html':
+                # Validate input content first
+                if not content or len(content.strip()) < 10:
+                    return {
+                        "success": False,
+                        "error": "HTML content is too short or empty. Please provide valid HTML content.",
+                        "file_path": None,
+                        "content_length": 0,
+                        "paragraphs": 0,
+                        "filename": None
+                    }
+                
                 processed_text = self.process_html(content, source_name=filename)
+                # Validate HTML processing result - try multiple fallback strategies
+                if not processed_text or len(processed_text.strip()) == 0:
+                    # Fallback 1: try basic extraction with BeautifulSoup
+                    try:
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(content, 'html.parser')
+                        for tag in soup(["script", "style", "meta", "link", "nav", "header", "footer"]):
+                            tag.decompose()
+                        processed_text = soup.get_text(separator=' ', strip=True)
+                        processed_text = re.sub(r'\s+', ' ', processed_text).strip()
+                    except Exception as e:
+                        pass
+                
+                # Fallback 2: if still empty, try regex-based extraction
+                if not processed_text or len(processed_text.strip()) < 10:
+                    # Remove HTML tags with regex
+                    text = re.sub(r'<[^>]+>', '', content)
+                    text = html.unescape(text)
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    if text and len(text) > 10:
+                        processed_text = text
             elif content_type == 'markdown':
                 processed_text = self.process_markdown(content, source_name=filename)
             elif content_type == 'url':
@@ -571,6 +812,17 @@ class UnstructuredDataProcessor:
                     raise ValueError(f"Failed to scrape URL: {content}")
             else:  # 'text' or default
                 processed_text = self.process_plain_text(content, source_name=filename)
+            
+            # Validate processed text
+            if not processed_text or len(processed_text.strip()) == 0:
+                return {
+                    "success": False,
+                    "error": "No content could be extracted from the input. Please check that your input contains readable text.",
+                    "file_path": None,
+                    "content_length": 0,
+                    "paragraphs": 0,
+                    "filename": None
+                }
             
             # Ensure filename is safe
             safe_filename = re.sub(r'[^\w\s-]', '', filename).strip()
@@ -587,18 +839,44 @@ class UnstructuredDataProcessor:
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(processed_text)
             
+            # Count paragraphs - improved logic
+            # First try splitting by double newlines
+            paragraphs = [p.strip() for p in processed_text.split('\n\n') if p.strip()]
+            
+            # If no double newlines, try single newlines for substantial content
+            if not paragraphs:
+                paragraphs = [p.strip() for p in processed_text.split('\n') if p.strip() and len(p.strip()) > 10]
+            
+            # If still no paragraphs but we have content, count by sentences or minimum length blocks
+            if not paragraphs and processed_text.strip():
+                # Split by periods and count substantial sentences
+                sentences = [s.strip() for s in processed_text.split('.') if s.strip() and len(s.strip()) > 10]
+                if sentences:
+                    # Group sentences into paragraphs (roughly 2-3 sentences per paragraph)
+                    para_count = max(1, len(sentences) // 2)
+                    paragraphs = ['dummy'] * para_count  # Just for counting
+                else:
+                    # Last resort: if we have any content, count as 1 paragraph
+                    paragraphs = ['dummy'] if len(processed_text.strip()) > 10 else []
+            
+            # Ensure we have at least 1 paragraph if content exists
+            para_count = len(paragraphs) if paragraphs else (1 if len(processed_text.strip()) > 10 else 0)
+            
             return {
                 "success": True,
                 "file_path": str(output_path),
                 "filename": safe_filename,
                 "content_length": len(processed_text),
-                "paragraphs": len([p for p in processed_text.split('\n\n') if p.strip()])
+                "paragraphs": para_count
             }
             
         except Exception as e:
             return {
                 "success": False,
                 "error": str(e),
-                "file_path": None
+                "file_path": None,
+                "content_length": 0,
+                "paragraphs": 0,
+                "filename": None
             }
 

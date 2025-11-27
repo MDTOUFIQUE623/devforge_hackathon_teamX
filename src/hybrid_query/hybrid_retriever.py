@@ -8,6 +8,7 @@ Based on GraphRAG / HybridRAG architecture:
 4. Merge vector + graph results, score & re-rank.
 """
 
+import re
 from typing import List, Dict, Any, Tuple
 from src.embedding.embedder import Embedder
 from src.vector_db.qdrant_client import LocalVectorDB  # or your custom client
@@ -90,10 +91,30 @@ class HybridRetriever:
             metadata = res.get("metadata", {})
             payload = res.get("payload", {})
             text = res.get("text", "").lower()
+            text_original = res.get("text", "")  # Keep original for quality checks
             
             # Quality filter: Skip very short or very low-scoring results
             if len(text.strip()) < 30 or vec_score < 0.2:
                 continue
+            
+            # Filter out contact information patterns (phone, email, URL only)
+            # This helps avoid returning just contact info when searching for profile content
+            contact_pattern = r'^[\+\d\s\-\(\)]+[\s|]*[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}[\s|]*https?://[^\s]+$'
+            if re.match(contact_pattern, text_original.strip()):
+                # Skip if it's just contact info (phone | email | URL)
+                continue
+            
+            # Penalize results that are mostly contact info
+            contact_info_score = 0.0
+            if re.search(r'[\+\d\s\-\(\)]{10,}', text_original):  # Phone number pattern
+                contact_info_score += 0.3
+            if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text_original):  # Email
+                contact_info_score += 0.3
+            if re.search(r'https?://[^\s]+', text_original):  # URL
+                contact_info_score += 0.2
+            
+            # If result is mostly contact info (score > 0.5), reduce its relevance
+            contact_penalty = max(0, (contact_info_score - 0.3) * 0.3) if contact_info_score > 0.5 else 0
             
             # Get entity_ids from either metadata or payload
             eids = metadata.get("entity_ids") or payload.get("entity_ids", [])
@@ -109,18 +130,30 @@ class HybridRetriever:
                     related_entities.append(ctx)
             
             # Query keyword boost: Boost score if query keywords appear in text
+            # Improved: Check for exact matches and also check if query words appear as whole words
             keyword_boost = 0.0
             if query_words:
-                matching_keywords = sum(1 for word in query_words if word in text)
-                keyword_boost = (matching_keywords / len(query_words)) * 0.2  # Max 0.2 boost
+                matching_keywords = 0
+                for word in query_words:
+                    # Check for whole word matches (better than substring matches)
+                    if re.search(r'\b' + re.escape(word) + r'\b', text):
+                        matching_keywords += 1
+                    elif word in text:
+                        matching_keywords += 0.5  # Partial match gets half credit
+                
+                keyword_boost = (matching_keywords / len(query_words)) * 0.3  # Increased max boost to 0.3
             
-            # Improved scoring: Weighted combination with keyword boost
-            # Vector similarity is most important (0.7), graph adds context (0.2), keywords add precision (0.1)
-            weighted_vec = vec_score * 0.7
-            weighted_graph = min(graph_score * 0.15, 0.2)  # Cap graph contribution
-            weighted_keywords = keyword_boost * 0.1
+            # Content quality boost: Prefer longer, more substantial content
+            content_quality = min(len(text.strip()) / 500, 0.15)  # Boost up to 0.15 for longer content
             
-            total_score = weighted_vec + weighted_graph + weighted_keywords
+            # Improved scoring: Weighted combination with keyword boost and content quality
+            # Vector similarity is most important (0.6), keywords add precision (0.2), content quality (0.1), graph adds context (0.1)
+            weighted_vec = vec_score * 0.6
+            weighted_keywords = keyword_boost * 0.2
+            weighted_content = content_quality * 0.1
+            weighted_graph = min(graph_score * 0.1, 0.1)  # Reduced graph contribution
+            
+            total_score = weighted_vec + weighted_keywords + weighted_content + weighted_graph - contact_penalty
 
             combined.append({
                 "vector_result": res,

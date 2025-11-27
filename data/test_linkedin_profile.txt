@@ -1,32 +1,13 @@
-## About
-Experienced software engineer with 10+ years in full-stack development. Passionate about building scalable applications and leading engineering teams. Specialized in Python, JavaScript, and cloud technologies.
-## Experience
-
-Senior Software Engineer Tech Corp Jan 2020 - Present · 4 years Leading development of microservices architecture. Implemented CI/CD pipelines reducing deployment time by 60%. Mentored junior developers and conducted code reviews.
-Software Engineer StartupXYZ Jun 2015 - Dec 2019 · 4 years 7 months Developed RESTful APIs and frontend applications. Worked with React, Node.js, and PostgreSQL. Collaborated with cross-functional teams on product features.
 ### Senior Software Engineer
+Tech Company
+Jan 2020 - Present · 4 yrs
+San Francisco Bay Area
+### Master of Science in Computer Science
 
-Jan 2020 - Present · 4 years
-Leading development of microservices architecture. Implemented CI/CD pipelines reducing deployment time by 60%. Mentored junior developers and conducted code reviews.
-### Software Engineer
-
-Jun 2015 - Dec 2019 · 4 years 7 months
-Developed RESTful APIs and frontend applications. Worked with React, Node.js, and PostgreSQL. Collaborated with cross-functional teams on product features.
-## Education
-
-Bachelor of Science in Computer Science University of California, Berkeley 2011 - 2015
-### Bachelor of Science in Computer Science
-
-University of California, Berkeley
-2011 - 2015
-## Skills
-
-## Recommendations
-"John is an exceptional engineer with deep technical expertise. He consistently delivers high-quality code and is a great team player." - Jane Smith, Engineering Manager
-- Python
-- JavaScript
-- React
-- Node.js
-- Docker
-- Kubernetes
-- Jane Smith, Engineering Manager
+Stanford University
+2016 - 2018
+Senior Software Engineer at Tech Company San Francisco Bay Area
+Senior Software Engineer at Tech Company
+Led development of microservices architecture serving 10M+ users. Implemented CI/CD pipelines reducing deployment time by 60%. Mentored junior engineers and contributed to open-source projects.
+Python JavaScript React Docker Kubernetes
+Passionate software engineer with 8+ years of experience building scalable web applications. Specialized in full-stack development, cloud infrastructure, and system design. Always eager to learn new technologies and contribute to meaningful projects.

@@ -32,6 +32,13 @@ class LocalVectorDB:
             self.vectors = np.zeros((0, self.dim), dtype=np.float32)
             self.ids = []
             self.payloads = {}
+    
+    def reload(self):
+        """
+        Reload vectors and metadata from disk.
+        Useful when the database is updated by another process or instance.
+        """
+        self._load()
 
     def _save(self):
         np.save(self.vec_path, self.vectors)

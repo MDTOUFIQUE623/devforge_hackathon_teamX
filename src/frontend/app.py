@@ -53,22 +53,38 @@ if uploaded_file:
                 
                 if result["success"]:
                     processed_html_path = Path(result["file_path"])
-                    st.success(f"✅ HTML processed successfully!")
-                    st.info(f"📝 Extracted {result['content_length']} characters, {result['paragraphs']} paragraphs")
+                    content_length = result.get('content_length', 0)
+                    paragraphs = result.get('paragraphs', 0)
+                    
+                    if content_length == 0 or paragraphs == 0:
+                        st.warning(f"⚠️ HTML processed but extracted minimal content: {content_length} characters, {paragraphs} paragraphs")
+                        st.info("💡 The HTML file may contain mostly scripts, styles, or empty content. Check the preview below.")
+                    else:
+                        st.success(f"✅ HTML processed successfully!")
+                        st.info(f"📝 Extracted {content_length} characters, {paragraphs} paragraphs")
+                    
                     st.info(f"💾 Processed text saved as: `{result['filename']}`")
                     
                     # Show preview of processed content
                     with st.expander("📄 Preview Processed Content"):
-                        preview_text = processed_html_path.read_text(encoding='utf-8')
-                        st.text_area(
-                            "Processed HTML Content Preview", 
-                            preview_text[:1000] + ("..." if len(preview_text) > 1000 else ""), 
-                            height=200, 
-                            disabled=True, 
-                            label_visibility="collapsed"
-                        )
+                        if processed_html_path.exists():
+                            preview_text = processed_html_path.read_text(encoding='utf-8')
+                            if preview_text.strip():
+                                st.text_area(
+                                    "Processed HTML Content Preview", 
+                                    preview_text[:1000] + ("..." if len(preview_text) > 1000 else ""), 
+                                    height=200, 
+                                    disabled=True, 
+                                    label_visibility="collapsed"
+                                )
+                            else:
+                                st.warning("The processed file is empty. The HTML may not contain extractable text content.")
+                        else:
+                            st.error(f"Processed file not found: {processed_html_path}")
                 else:
-                    st.error(f"❌ HTML processing failed: {result.get('error', 'Unknown error')}")
+                    error_msg = result.get('error', 'Unknown error')
+                    st.error(f"❌ HTML processing failed: {error_msg}")
+                    st.info("💡 Tip: Make sure your HTML file contains readable text content, not just scripts or styles.")
         except Exception as e:
             st.error(f"❌ Error processing HTML: {e}")
             import traceback
@@ -184,7 +200,18 @@ if st.button("🔄 Convert & Process", type="primary"):
                 
                 if result["success"]:
                     st.success(f"✅ Content converted and saved as: `{result['filename']}`")
-                    st.info(f"📊 Processed: {result['content_length']} characters, {result['paragraphs']} paragraphs")
+                    
+                    # Get content length and paragraphs with proper defaults
+                    content_length = result.get('content_length', 0)
+                    paragraphs = result.get('paragraphs', 0)
+                    
+                    # Debug: Show what we got
+                    if content_length == 0 or paragraphs == 0:
+                        st.warning(f"⚠️ Warning: Extracted minimal content - {content_length} characters, {paragraphs} paragraphs")
+                        st.info("💡 This might indicate the HTML contains mostly scripts, styles, or empty content.")
+                        st.info("💡 Check the preview below to see what was extracted.")
+                    else:
+                        st.info(f"📊 Processed: {content_length} characters, {paragraphs} paragraphs")
                     
                     # Show preview
                     with st.expander("📄 Preview Converted Content"):
@@ -257,19 +284,28 @@ if st.button("Search"):
                 """)
                 
                 # Show full text in a clean, readable format
-                st.markdown("**Retrieved Content:**")
-                # Display full text - use markdown for better formatting, preserve line breaks
+                st.markdown("**Retrieved Content (Full Paragraph):**")
+                # Display full text - ensure we show the complete paragraph without truncation
                 if full_text:
-                    # Calculate height based on content length (min 150, max 400)
-                    text_height = min(max(150, len(full_text) // 4), 400)
+                    # Calculate height based on content length (min 200, no max limit for long content)
+                    # Use approximately 20 pixels per line, with a minimum of 200px
+                    estimated_lines = max(len(full_text) // 80, 10)  # Rough estimate: 80 chars per line
+                    text_height = max(200, estimated_lines * 20)
+                    # Cap at a reasonable maximum but allow scrolling for very long content
+                    text_height = min(text_height, 800)  # Max 800px, but content will scroll if longer
+                    
                     st.text_area(
                         "Retrieved Content Text", 
                         full_text, 
                         height=text_height, 
                         key=f"result_text_{idx}", 
                         disabled=True, 
-                        label_visibility="collapsed"
+                        label_visibility="collapsed",
+                        help=f"Full paragraph content ({len(full_text)} characters)"
                     )
+                    
+                    # Show character count for reference
+                    st.caption(f"📏 Content length: {len(full_text)} characters")
                 else:
                     st.warning("No content retrieved for this result.")
 
@@ -303,12 +339,39 @@ if st.button("Search"):
                             
                             # Display the retrieved paragraph
                             if retrieved_paragraph:
-                                st.subheader(f"Paragraph {retrieved_paragraph.get('id', 'N/A')}")
-                                st.text_area("Paragraph Content", retrieved_paragraph.get("text", ""), height=300, key=f"para_content_{idx}", disabled=True, label_visibility="collapsed")
+                                para_text = retrieved_paragraph.get("text", "")
+                                st.subheader(f"Paragraph {retrieved_paragraph.get('id', 'N/A')} (Full Content)")
+                                # Calculate height for full paragraph display
+                                para_lines = max(len(para_text) // 80, 10)
+                                para_height = max(300, min(para_lines * 20, 1000))  # Up to 1000px for very long paragraphs
+                                
+                                st.text_area(
+                                    "Full Paragraph Content", 
+                                    para_text, 
+                                    height=para_height, 
+                                    key=f"para_content_{idx}", 
+                                    disabled=True, 
+                                    label_visibility="collapsed",
+                                    help=f"Complete paragraph from source document ({len(para_text)} characters)"
+                                )
+                                st.caption(f"📏 Full paragraph length: {len(para_text)} characters")
                             else:
                                 # Fallback: show the full text we retrieved
-                                st.subheader("Retrieved Content")
-                                st.text_area("Retrieved Content Text", full_text, height=300, key=f"fallback_para_{idx}", disabled=True, label_visibility="collapsed")
+                                st.subheader("Retrieved Content (Full Text)")
+                                # Use same height calculation as main display
+                                fallback_lines = max(len(full_text) // 80, 10)
+                                fallback_height = max(300, min(fallback_lines * 20, 1000))
+                                
+                                st.text_area(
+                                    "Retrieved Content Text", 
+                                    full_text, 
+                                    height=fallback_height, 
+                                    key=f"fallback_para_{idx}", 
+                                    disabled=True, 
+                                    label_visibility="collapsed",
+                                    help=f"Complete retrieved content ({len(full_text)} characters)"
+                                )
+                                st.caption(f"📏 Content length: {len(full_text)} characters")
                                 st.info("Note: Could not locate exact paragraph in document. Showing retrieved content.")
                             
                             # Show document metadata
