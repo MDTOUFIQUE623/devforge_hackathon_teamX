@@ -5,28 +5,75 @@ Extracts:
 - Metadata
 - Paragraphs
 - Tables (if present)
-- Placeholder for entity extraction
+- Entity extraction using spaCy NER (with fallback to simple extraction)
 
 Supported formats: txt, pdf, docx, csv
+
+Note: For spaCy NER, install spaCy and download a model:
+    pip install spacy
+    python -m spacy download en_core_web_sm
 """
 
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 from docling.document_converter import DocumentConverter
 from docling.datamodel.base_models import ConversionStatus
+import hashlib
+
+# Try to import spaCy for advanced NER
+try:
+    import spacy
+    SPACY_AVAILABLE = True
+except ImportError:
+    SPACY_AVAILABLE = False
+    spacy = None
 
 
 class IngestionPipeline:
     SUPPORTED_EXT = {".txt", ".pdf", ".docx", ".csv"}
 
-    def __init__(self):
+    def __init__(self, use_spacy: bool = True, spacy_model: str = "en_core_web_sm"):
         """
-        Initialize the Docling document converter
+        Initialize the Docling document converter and spaCy NER model.
+        
+        Args:
+            use_spacy: If True, use spaCy for entity extraction (default: True)
+            spacy_model: spaCy model to use (default: "en_core_web_sm")
         """
         # Use default pipeline options from the installed Docling version.
         # The constructor signature may change across versions, so we avoid
         # passing deprecated/removed keyword arguments like `pipeline_options`.
         self.converter = DocumentConverter()
+        
+        # Initialize spaCy NER model
+        self.use_spacy = use_spacy and SPACY_AVAILABLE
+        self.spacy_model_name = spacy_model
+        self.nlp = None
+        
+        if self.use_spacy:
+            try:
+                # Try to load the specified model
+                self.nlp = spacy.load(spacy_model)
+                print(f"✅ Loaded spaCy model: {spacy_model}")
+            except OSError:
+                # Model not found, try to download it or use a fallback
+                try:
+                    # Try loading a smaller model or default
+                    if spacy_model != "en_core_web_sm":
+                        self.nlp = spacy.load("en_core_web_sm")
+                        print(f"⚠️  Model {spacy_model} not found, using en_core_web_sm")
+                    else:
+                        # Model needs to be downloaded
+                        print(f"⚠️  spaCy model {spacy_model} not found. Please run: python -m spacy download {spacy_model}")
+                        print("   Falling back to simple entity extraction.")
+                        self.use_spacy = False
+                except Exception as e:
+                    print(f"⚠️  Could not load spaCy model: {e}")
+                    print("   Falling back to simple entity extraction.")
+                    self.use_spacy = False
+            except Exception as e:
+                print(f"⚠️  Error initializing spaCy: {e}")
+                self.use_spacy = False
 
     def run(self, file_path: str) -> Dict[str, Any]:
         """
@@ -70,8 +117,11 @@ class IngestionPipeline:
         # Split text into paragraphs
         paragraphs = self._split_into_paragraphs(raw_text)
 
-        # Extract entities (simple keyword-based extraction)
-        entities, relationships = self._extract_entities_simple(paragraphs)
+        # Extract entities using spaCy NER (with fallback to simple extraction)
+        if self.use_spacy and self.nlp:
+            entities, relationships = self._extract_entities_spacy(paragraphs)
+        else:
+            entities, relationships = self._extract_entities_simple(paragraphs)
 
         # Metadata
         metadata = {
@@ -152,6 +202,197 @@ class IngestionPipeline:
                 })
         
         return paragraphs
+
+    def _extract_entities_spacy(self, paragraphs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Extract entities using spaCy NER (Named Entity Recognition).
+        Uses spaCy's advanced NLP capabilities for accurate entity extraction.
+        
+        Args:
+            paragraphs: List of paragraph dictionaries with 'id' and 'text' keys
+            
+        Returns:
+            Tuple of (entities, relationships) where:
+            - entities: List of entity dicts with id, label, metadata
+            - relationships: List of relationship dicts with start, end, type, metadata
+        """
+        entities = []
+        relationships = []
+        entity_map = {}  # Maps entity_id -> entity dict
+        entity_text_to_id = {}  # Maps normalized entity text -> entity_id
+        
+        # Map spaCy labels to our entity labels
+        spacy_to_label = {
+            "PERSON": "Person",
+            "ORG": "Company",
+            "GPE": "Location",  # Geopolitical entity (countries, cities, etc.)
+            "LOC": "Location",  # Non-geopolitical locations
+            "MONEY": "Concept",
+            "DATE": "Concept",
+            "TIME": "Concept",
+            "PERCENT": "Concept",
+            "QUANTITY": "Concept",
+            "EVENT": "Concept",
+            "PRODUCT": "Concept",
+            "WORK_OF_ART": "Concept",
+            "LAW": "Concept",
+            "LANGUAGE": "Concept",
+            "NORP": "Concept",  # Nationalities or religious/political groups
+        }
+        
+        # Process each paragraph
+        for para in paragraphs:
+            para_text = para["text"]
+            para_entities = []
+            
+            # Process paragraph with spaCy
+            doc = self.nlp(para_text)
+            
+            # Extract named entities
+            for ent in doc.ents:
+                # Skip very short entities (likely false positives)
+                if len(ent.text.strip()) < 2:
+                    continue
+                
+                # Get our label mapping
+                entity_label = spacy_to_label.get(ent.label_, "Concept")
+                
+                # Create normalized entity ID from text
+                entity_text_normalized = ent.text.strip().lower().replace(" ", "_")
+                # Create unique ID using hash to handle duplicates
+                entity_id_base = f"e_{entity_text_normalized}"
+                entity_id = hashlib.md5(f"{entity_id_base}_{ent.label_}".encode()).hexdigest()[:12]
+                entity_id = f"e_{entity_id}"
+                
+                # Check if we've seen this entity before (by text and label)
+                entity_key = (ent.text.strip().lower(), ent.label_)
+                if entity_key not in entity_text_to_id:
+                    entity_text_to_id[entity_key] = entity_id
+                    
+                    # Create entity dict
+                    entity_dict = {
+                        "id": entity_id,
+                        "label": entity_label,
+                        "metadata": {
+                            "name": ent.text.strip(),
+                            "spacy_label": ent.label_,
+                            "spacy_label_desc": spacy.explain(ent.label_) if SPACY_AVAILABLE and hasattr(spacy, 'explain') else ent.label_,
+                            "start_char": ent.start_char,
+                            "end_char": ent.end_char
+                        }
+                    }
+                    entity_map[entity_id] = entity_dict
+                    entities.append(entity_dict)
+                
+                entity_id = entity_text_to_id[entity_key]
+                para_entities.append(entity_id)
+            
+            # Extract relationships using dependency parsing
+            # Look for common relationship patterns
+            for token in doc:
+                # Pattern: PERSON works at ORG
+                if token.dep_ == "nsubj" and token.head.pos_ == "VERB":
+                    # Find the subject (person) and object (company/location)
+                    subject_ent = None
+                    object_ent = None
+                    
+                    # Find entity for subject
+                    for ent in doc.ents:
+                        if ent.start <= token.i < ent.end:
+                            if ent.label_ == "PERSON":
+                                subject_ent = ent
+                            break
+                    
+                    # Find entity for object (dobj or pobj)
+                    for child in token.head.children:
+                        if child.dep_ in ["dobj", "pobj", "prep"]:
+                            for ent in doc.ents:
+                                if ent.start <= child.i < ent.end:
+                                    if ent.label_ in ["ORG", "GPE", "LOC"]:
+                                        object_ent = ent
+                                    break
+                    
+                    # Create relationship if we found both
+                    if subject_ent and object_ent:
+                        subj_id = entity_text_to_id.get((subject_ent.text.strip().lower(), subject_ent.label_))
+                        obj_id = entity_text_to_id.get((object_ent.text.strip().lower(), object_ent.label_))
+                        
+                        if subj_id and obj_id:
+                            # Determine relationship type based on verb
+                            verb_text = token.head.text.lower()
+                            rel_type = "RELATED_TO"
+                            
+                            if any(v in verb_text for v in ["work", "employed", "hired"]):
+                                rel_type = "WORKS_AT"
+                            elif any(v in verb_text for v in ["live", "located", "based"]):
+                                rel_type = "LOCATED_IN"
+                            elif any(v in verb_text for v in ["found", "create", "establish"]):
+                                rel_type = "FOUNDED"
+                            elif any(v in verb_text for v in ["own", "acquire", "purchase"]):
+                                rel_type = "OWNS"
+                            
+                            # Check if relationship already exists
+                            rel_key = (subj_id, obj_id, rel_type)
+                            if not any(r["start"] == subj_id and r["end"] == obj_id and r["type"] == rel_type 
+                                     for r in relationships):
+                                relationships.append({
+                                    "start": subj_id,
+                                    "end": obj_id,
+                                    "type": rel_type,
+                                    "metadata": {
+                                        "source": para["id"],
+                                        "verb": token.head.text,
+                                        "confidence": "medium"
+                                    }
+                                })
+            
+            # Also create simple co-occurrence relationships for entities in same paragraph
+            # If multiple entities of different types appear together, create relationships
+            person_entities = [eid for eid in para_entities 
+                             if entity_map.get(eid, {}).get("label") == "Person"]
+            company_entities = [eid for eid in para_entities 
+                              if entity_map.get(eid, {}).get("label") == "Company"]
+            location_entities = [eid for eid in para_entities 
+                               if entity_map.get(eid, {}).get("label") == "Location"]
+            
+            # Person-Company relationships
+            for person_id in person_entities:
+                for company_id in company_entities:
+                    rel_key = (person_id, company_id, "WORKS_AT")
+                    if not any(r["start"] == person_id and r["end"] == company_id and r["type"] == "WORKS_AT" 
+                             for r in relationships):
+                        relationships.append({
+                            "start": person_id,
+                            "end": company_id,
+                            "type": "WORKS_AT",
+                            "metadata": {
+                                "source": para["id"],
+                                "confidence": "low",
+                                "method": "co_occurrence"
+                            }
+                        })
+            
+            # Company-Location relationships
+            for company_id in company_entities:
+                for location_id in location_entities:
+                    rel_key = (company_id, location_id, "LOCATED_IN")
+                    if not any(r["start"] == company_id and r["end"] == location_id and r["type"] == "LOCATED_IN" 
+                             for r in relationships):
+                        relationships.append({
+                            "start": company_id,
+                            "end": location_id,
+                            "type": "LOCATED_IN",
+                            "metadata": {
+                                "source": para["id"],
+                                "confidence": "low",
+                                "method": "co_occurrence"
+                            }
+                        })
+            
+            # Store entity_ids in paragraph for later use
+            para["entity_ids"] = para_entities
+        
+        return entities, relationships
 
     def _extract_entities_simple(self, paragraphs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """

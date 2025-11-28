@@ -64,3 +64,4 @@ pip install chromadb>=0.4.0
 
 The package is already listed in `requirements.txt` as an optional dependency.
 
+
